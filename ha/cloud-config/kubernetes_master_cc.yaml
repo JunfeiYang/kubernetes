@@ -1,0 +1,163 @@
+#cloud-config
+---
+hostname: kubernetes-master
+users:
+  - name: core
+    ssh-authorized-keys:
+      - "<SSH_PUBLIC_KEY>"
+    groups:
+      - sudo
+    shell: /bin/bash
+
+write_files:
+  - path: /opt/bin/kubernetes-install.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #! /usr/bin/bash
+
+      if [ ! -f /opt/bin/kubelet ]; then
+        echo "Kubenetes not installed - installing."
+
+        # Extract the Kubernetes binaries.
+        sudo wget -N -P /opt/bin https://github.com/typhoonzero/kubernetes_binaries/releases/download/v1.2.0/kubectl
+        sudo wget -N -P /opt/bin https://github.com/typhoonzero/kubernetes_binaries/releases/download/v1.2.0/kubelet
+        sudo chmod +x /opt/bin/kubelet /opt/bin/kubectl
+      fi
+
+  - path: /etc/flannel/options.env
+    owner: root
+    permissions: 0644
+    content: |
+      FLANNELD_IFACE=<MASTER_IP>
+      FLANNELD_ETCD_ENDPOINTS=<MY_ETCD_ENDPOINTS>
+
+  - path: /opt/bin/install-manifests.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #! /usr/bin/bash
+
+      # Ensure directories exists.
+      sudo mkdir -p /etc/kubernetes/manifests/
+      sudo mkdir -p /etc/kubernetes/ssl/
+      sudo mkdir -p /etc/kubernetes/addons/
+
+      if [ ! -f /etc/kubernetes/manifests/kubernetes-master.manifest ]; then
+        echo "Manifests not installed - installing."
+
+        # Download config.
+        sudo wget -N -P /etc/kubernetes/manifests/ https://raw.githubusercontent.com/typhoonzero/kubernetes_binaries/master/cloud-config/kubernetes_master.manifest
+        sudo wget -N -P /etc/kubernetes/addons/ https://raw.githubusercontent.com/typhoonzero/kubernetes_binaries/master/cloud-config/skydns.yaml
+      fi
+
+      # Insert the master's IP address into the manifest.
+      echo "DEFAULT_IPV4: $DEFAULT_IPV4"
+      #sudo sed -i -e "s/<MASTER_IPV4>/$DEFAULT_IPV4/g" /etc/kubernetes/manifests/calico-etcd.manifest
+      sudo sed -i -e "s/<ETCD_ENDPOINTS>/<MY_ETCD_ENDPOINTS>/g" /etc/kubernetes/manifests/kubernetes_master.manifest
+      sudo sed -i -e "s/<ETCD_ENDPOINTS>/<MY_ETCD_ENDPOINTS>/g" /etc/kubernetes/addons/skydns.yaml
+
+coreos:
+  update:
+    reboot-strategy: off
+
+  flannel:
+    interface: $public_ipv4
+
+  units:
+    - name: setup-network-environment.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Setup Network Environment
+        Documentation=https://github.com/kelseyhightower/setup-network-environment
+        Requires=network-online.target
+        After=network-online.target
+
+        [Service]
+        ExecStartPre=-/usr/bin/mkdir -p /opt/bin
+        ExecStartPre=-/usr/bin/wget -N -P /opt/bin https://github.com/kelseyhightower/setup-network-environment/releases/download/1.0.1/setup-network-environment
+        ExecStartPre=-/usr/bin/chmod +x /opt/bin/setup-network-environment
+        ExecStart=/opt/bin/setup-network-environment
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: manifest-install.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Installs Manifests
+        After=setup-network-environment.service
+        Requires=setup-network-environment.service
+
+        [Service]
+        EnvironmentFile=/etc/network-environment
+        ExecStart=/opt/bin/install-manifests.sh
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: flanneld.service
+      drop-ins:
+      - name: 50-network-config.conf
+        content: |
+          [Service]
+          ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{ "Network": "10.1.0.0/16", "Backend":{"Type": "host-gw"} }'
+      command: start
+
+    - name: docker.service
+      runtime: true
+      command: start
+      drop-ins:
+      - name: 40-docker-flannel.conf
+        content: |
+          [Unit]
+          After=docker.socket early-docker.target network.target flanneld.service
+          Requires=docker.socket early-docker.target flanneld.service
+
+    - name: kubernetes-install.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Installs Kubernetes tools
+        After=manifest-install.service
+        Requires=manifest-install.service
+
+        [Service]
+        ExecStart=/opt/bin/kubernetes-install.sh
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: kubelet.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Kubelet
+        Documentation=https://github.com/kubernetes/kubernetes
+        Requires=docker.service kubernetes-install.service
+        After=kubernetes-install.service docker.service
+
+        [Service]
+        Environment=KUBELET_VERSION=v1.2.4_coreos.1
+        EnvironmentFile=/etc/network-environment
+        ExecStart=/usr/lib/coreos/kubelet-wrapper \
+        --pod_infra_container_image=typhoon1986/pause:2.0 \
+        --register-node=true \
+        --api-servers=http://<MASTER_IP>:8080 \
+        --network-plugin-dir=/etc/kubernetes/cni/net.d \
+        --network-plugin=${NETWORK_PLUGIN} \
+        --register-schedulable=false \
+        --allow-privileged=true \
+        --config=/etc/kubernetes/manifests \
+        --hostname-override=<MASTER_IP> \
+        --cluster-dns=10.100.0.10 \
+        --cluster-domain=cluster.local
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target

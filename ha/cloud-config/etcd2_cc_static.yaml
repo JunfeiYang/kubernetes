@@ -1,0 +1,16 @@
+#cloud-config
+
+coreos:
+  etcd2:
+    # must give the node name
+    name: "<node_name>"
+    advertise-client-urls: http://<ipv4_ip>:2379
+    initial-advertise-peer-urls: http://<ipv4_ip>:2380
+    listen-client-urls: http://<ipv4_ip>:2379,http://0.0.0.0:4001
+    listen-peer-urls: http://<ipv4_ip>:2380,http://0.0.0.0:7001
+    initial-cluster-token: etcd-cluster-1
+    initial-cluster: infra0=http://<infra0_ip>:2380,infra1=http://${infra1_ip}:2380,infra2=http://${infra2_ip}:2380
+    initial-cluster-state: new
+  units:
+    - name: etcd2.service
+      command: start
