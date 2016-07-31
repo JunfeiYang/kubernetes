@@ -23,9 +23,12 @@ kubernetes master节点扮演者总控制中心的角色，主要的三个服务
 
 ###　部署kubernetes集群环境
 #####etcd集群的部署
-参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config部署etcd的方案，将etcd分别部署到kubernetes-master01，kubernetes-master02，kubernetes-master03上，可以使用static方式也可以使用基于token的服务发现的方式。
+参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config
+部署etcd的方案，将etcd分别部署到kubernetes-master01，kubernetes-master02，kubernetes-master03上，可以使用static方式也可以使用基于token的服务发现的方式。
 #####kubernetes master集群的部署
-参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config部署master的方案。在部署前注意需要修改的地方主要有一下几点：
+kubernetes master 会启动几个服务kube-apiserver,kube-controller-manage和kube-sheduler，master在集群环境下，多台master中的api server是同时工作的，而对集群状态存在修改动作的kube-controller-manage和kube-sheduler，同时只有一个实例在运行。为实现master节点的高可用性，首先需要一个load balancer，将请求转发给各个master节点，如果某一个master节点down机，如果转发规则没有及时更新，就会存在无效请求，导致服务不可用的状态，所以还需要对master节点存在健康检查的操作。
+参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config
+部署master的方案。在部署前注意需要修改的地方主要有一下几点：
 １.将kubernetes_master.manifest中
 ```
 metadata: 
@@ -38,8 +41,9 @@ metadata:
   labels:
 service: k8s
 ```
+每个master节点会启动一个pod，该pod里面包含四个容器，分别为kube-apiserver,kube-controller-manage和kube-sheduler,kube-proxy,并打上labels为service: k8s的标签，后面定义的service会根据该labels，通过selector选取pod实现master负载均衡
 2.多master集群部署和单master部署方式一样，需要修改kubernetes_master_cc.yaml，修改<MASTER_IP>为本机的IP地址，及修改<MY_ETCD_ENDPOINTS>为etcd集群的endpoints串
-3.创建service做为load balancer
+#####创建service做为load balancer
 ```
 apiVersion: v1
 kind: Service
@@ -54,10 +58,48 @@ spec:
   selector:
 service: k8s
 ```
-
-
-
-
-
+由于kube-controller-manager已开启livenessProbe探针
+```
+- name: kube-controller-manager
+      image: typhoon1986/hyperkube-amd64:v1.2.0
+      command:
+      - /hyperkube
+      - controller-manager
+      - --master=http://127.0.0.1:8080
+      - --service-account-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+      - --root-ca-file=/etc/kubernetes/ssl/ca.pem
+      livenessProbe:
+        httpGet:
+          host: 127.0.0.1
+          path: /healthz
+          port: 10252s
+        initialDelaySeconds: 15
+timeoutSeconds: 1
+```
+kube-scheduler已开启livenessProbe探针
+```
+  - name: kube-scheduler
+      image: typhoon1986/hyperkube-amd64:v1.2.0
+      command:
+      - /hyperkube
+      - scheduler
+      - --master=http://127.0.0.1:8080
+      livenessProbe:
+        httpGet:
+          host: 127.0.0.1
+          path: /healthz
+          port: 10251
+        initialDelaySeconds: 15
+timeoutSeconds: 1
+```
+详细见kubernetes_master.manifest文件。所以该service,通过selector选取labels为service:k8s为的pod时，默认会根据pod的健康状态，更新该service对应的endpoints列表
+#####kubernetes　worker集群的部署
+参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config
+部署worker的方案，不同的是<KUBERNETES_MASTER>的地址不是设置为kubernetes　master的ip地址，而是load balancer的cluster ip地址
+#####配置TLS
+master节点和worker的通信以及和client的通信都需要基于TLS相互信任。
+参考https://github.com/k8sp/bigdata/tree/master/install/cloud-config
+部署TLS. 
 ## TODO
+如果master节点down机，而定义的service对应的endpoints列表更新大概需要20-30秒，仍然存在无效请求的状况。基于service实现的load balancer底层主要基于iptables中nat转换的rule实现，需要对另外一种方案haproxy+keepalive实现的ha方案做一个性能方面的对比。
 
